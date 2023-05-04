@@ -34,6 +34,8 @@ from netaddr.ip.rfc1924 import base85_to_ipv6, ipv6_to_base85
 
 from netaddr.eui import EUI, IAB, OUI, EUIRange, EUIPrefix, iter_EUIRange
 
+from netaddr.eui.sets import EUISet
+
 from netaddr.strategy.ipv4 import valid_str as valid_ipv4
 
 from netaddr.strategy.ipv6 import (valid_str as valid_ipv6, ipv6_compact,
