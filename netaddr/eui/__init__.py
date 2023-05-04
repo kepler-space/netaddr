@@ -1070,3 +1070,218 @@ class EUIRange:
         return self.__class__.__name__
 
 
+class EUIPrefix:
+    """
+    An object representing a prefix for an EUI 48 MAC address. This is internally represented
+    as a string. Holds objects such as:
+    - AA:AA:AA:A
+    - BB:BB:BB:BA
+    - 00:11:22:33:4A
+    """
+    __slots__ = ('_value', '_separator')
+
+    def __init__(self, addr: str):
+        """Constructs the object.
+
+        Args:
+            addr (str): A prefix defined as a string.
+
+        Raises:
+            AddrFormatError: Raises an error if an incorrectly formatted prefix is passed.
+        """
+        ### Parse string
+        # Get every third character in the address, except the last one.
+        # These characters should all be the separator.
+        separators = addr[2:-1:3]
+
+        # Get the remaining part of the string.
+        nibble_list = list(addr)
+        del nibble_list[2:-1:3]
+        addr_stripped = ''.join(nibble_list)
+
+        ### Validate input.
+        # Check every separator is valid, consistently used, and the remaining string is hex.
+        is_valid = separators[0] in ':-' and \
+            all(c == separators[0] for c in separators) and \
+            all(c in hexdigits for c in addr_stripped) and \
+            len(addr_stripped) <= 12
+        # Optionally, add a check for specific prefix lengths.
+
+        if not is_valid:
+            raise AddrFormatError(f'Invalid EUI prefix: {addr}')
+
+        ### Populate slots.
+        self._value = addr_stripped.upper()
+        self._separator = separators[0] if separators else '' # Use '' if too short for separators.
+
+
+    def __getstate__(self) -> Tuple[str, str]:
+        """The pickleable tuple representation of `EUIPrefix` object.
+
+        Returns:
+            Tuple[str, int]: The pickled state of the EUIPrefix object.
+        """
+        return self._value, self._separator
+
+    def __setstate__(self, state: Tuple[str, str]):
+        """Unpickles a pickled EUIPrefix object from the tuple representation.
+
+        Args:
+            state (Tuple[str, int]): The pickled values of the EUIPrefix object.
+        """
+        self._value, self._separator = state
+
+    def __iter__(self) -> Union[Iterator[EUI], Any]:
+        """An iterator providing access to all `EUI` objects within range represented by this
+        ranged EUI object.
+
+        Yields:
+            Iterator[EUI]: The iterator containing the EUI objects between the first and last EUI
+            within the range.
+        """
+        for eui in EUIRange(EUI(self.first), EUI(self.last)):
+            yield eui
+
+    @property
+    def size(self) -> int:
+        """The total number of EUI addresses within this ranged EUI object.
+
+        Returns:
+            int: The number of addresses as a subset of the prefix.
+        """
+        return int(self.last - self.first + 1)
+
+    def __len__(self) -> int:
+        """The magic method returning the total number of EUI addresses within this ranged EUI
+        object.
+
+        Returns:
+            int: The number of addresses as a subset of the prefix.
+        """
+        return self.size
+    
+    @overload
+    def __getitem__(self, index: int) -> EUI: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Iterator[EUI]: ...
+
+    def __getitem__(self, index: Union[int,
+                                       slice]) -> Union[EUI, Iterator[EUI]]:
+        """The MAC address(es) in this `EUIPrefix` object referenced by an index or slice.
+
+        Args:
+            index (Union[int, slice]): The index or slice over the `EUIPrefix`.
+
+        Raises:
+            IndexError: Raises index errors if the entered index or slice is beyond the range.
+
+        Returns:
+            Union[EUI, Iterator[EUI]]: The MAC address(es) existing as a subset of this `EUIPrefix`
+            object referenced by index or slice. As slicing can produce large sequences of objects
+            an iterator is returned instead of the more usual `list`.
+        """
+        return EUIRange(self.first, self.last)[index]
+
+    @property
+    def prefixlen(self) -> int:
+        """The number of bits in the EUI prefix. For example, AA:AA:AA:A = 28.
+
+        Returns:
+            int: The number of bits in the EUI prefix.
+        """
+        return len(self._value) * 4
+
+    @property
+    def eui(self) -> EUI:
+        """The EUI address of this prefix, right-padded with 0s.
+
+        Returns:
+            EUI: The EUI address of this prefix, right-padded with 0s.
+        """
+        eui_pad = '000000000000'
+        eui = f'{self._value}{eui_pad[len(self._value):]}'
+        return EUI(eui)
+
+    @property
+    def broadcast(self) -> EUI:
+        """The broadcast address of this `EUIPrefix` object. For MAC addresses, this is always the
+        same.
+
+        Returns:
+            EUI: The EUI object of the broadcast address.
+        """
+        return EUI('FF:FF:FF:FF:FF:FF')
+
+    @property
+    def first(self) -> int:
+        """The EUI address of the first EUI found within this prefix's range.
+
+        Returns:
+            int: The first EUI address within this prefix as an integer.
+        """
+        return int(self.eui)
+
+    @property
+    def last(self) -> int:
+        """The EUI address of the last EUI found within this prefix's range.
+
+        Returns:
+            int: The last EUI address within this prefix as an integer.
+        """
+        eui_pad = 'FFFFFFFFFFFF'
+        eui = f'{self._value}{eui_pad[len(self._value):]}'
+        return int(EUI(eui))
+
+    def __contains__(self, other_mac_address: Union[EUI, EUIRange, Any]):
+        """Checks whether an EUI exists within the current `EUIPrefix` object.
+
+        Args:
+            other_mac_address (Union[EUI, EUIRange, Any]): The EUI or EUIRange whose presence
+            within the current prefix space is being checked.
+
+        Returns:
+            bool: A boolean indicating the presence of `other_mac_address` in this EUIRange.
+        """
+        if isinstance(other_mac_address, EUIRange):
+            return self.first <= other_mac_address.first \
+                and other_mac_address.last <= self.last
+        elif isinstance(other_mac_address, EUI):
+            return self.first <= other_mac_address <= self.last
+        else:
+            # Whatever it is, try to interpret it as EUIPrefix.
+            return EUI(other_mac_address) in self
+
+    def key(self) -> Tuple[int, int]:
+        """A key to allow unique identification of this prefix.
+
+        Returns:
+            Tuple[int, int]: A tuple containing the first value in the prefix and the last value.
+        """
+        return self.first, self.last
+
+    def sort_key(self) -> Tuple[int, int]:
+        """A key to allow sorting identification of this prefix.
+
+        Returns:
+            Tuple[int, int]: A tuple containing the first value in the prefix and the length of the
+            prefix.
+        """
+        return self.first, self.prefixlen
+
+    def __str__(self) -> str:
+        """The magic method to return a string for the EUIPrefix class.
+
+        Returns:
+            str: The string representation of this MAC Prefix.
+        """
+        output_string = ':'.join(self._value[i:i+2] for i in range(0, len(self._value), 2))
+        return f"{output_string}"
+
+    def __repr__(self) -> str:
+        """The magic method to create an equivalent object.
+
+        Returns:
+            _type_: The string statement to create an equivalent object.
+        """
+        return f"{self.__class__.__name__}('{self}')"
