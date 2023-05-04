@@ -8,12 +8,37 @@ Classes and functions for dealing with MAC addresses, EUI-48, EUI-64, OUI, IAB
 identifiers.
 """
 
+from string import hexdigits
+from typing import Any, Iterator, overload, Tuple, Union
+
 from netaddr.core import NotRegisteredError, AddrFormatError, DictDotLookup
 from netaddr.strategy import eui48 as _eui48, eui64 as _eui64
 from netaddr.strategy.eui48 import mac_eui48
 from netaddr.strategy.eui64 import eui64_base
 from netaddr.ip import IPAddress
 from netaddr.compat import _importlib_resources, _is_int, _is_str
+
+
+def iter_EUIRange(start: 'EUI',
+                  end: 'EUI',
+                  step: int = 1) -> Iterator['EUI']:
+    """A generator that produces EUI objects between an arbitrary start and stop EUI address with
+    intervals of step between them. Sequences produce are inclusive of boundary EUIs. In the case of
+    negative stepping, `start` will be greater than `end`.
+
+    Args:
+        start (EUI): The starting EUI.
+        end (EUI): The ending EUI.
+        step (Optional[int], optional): The size of the step between EUIs. Defaults to 1.
+
+    Raises:
+        ValueError: The step argument cannot be zero.
+    Yields:
+        Iterator[EUI]: An iterator of one or more `EUI` objects.
+    """
+    end = int(end) + 1 if start < end else int(end) - 1
+    for i in range(start, end, step):
+        yield EUI(i)
 
 
 class BaseIdentifier(object):
@@ -749,4 +774,299 @@ class EUI(BaseIdentifier):
     def __repr__(self):
         """:return: executable Python string to recreate equivalent object."""
         return "EUI('%s')" % self
+
+
+class EUIRange:
+    """
+    An arbitrary EUI address range.
+
+    This is formed from a lower bound EUI address, and an upper bound EUI address.
+    The lower bound must be numerically smaller than the upper bound.
+    """
+    __slots__ = ('_start', '_end', '_module')
+    # Ranged EUI objects always represent a sequence of at least one EUI address and are therefore
+    # always True in the boolean context.
+    __bool__ = True
+
+    def __init__(self, start: Union[EUI, Any], end: Union[EUI, Any]):
+        """Constructor for the EUIRange object. Requires a start and end range that will be
+        represented within the object.
+
+        Args:
+            start (Union[EUI, Any]): The lower boundary of the range.
+            end (Union[EUI, Any]): The upper boundary of the range.
+
+        Raises:
+            AddrFormatError: Raises an error of the lower bound is greater than the upper bound.
+        """
+        if start > end:
+            raise AddrFormatError(
+                'The lower bound MAC address is greater than the upper bound.')
+        self._start = EUI(start)
+        self._module = self._start._module
+        self._end = EUI(end, version=self._start._module.version)
+
+    def __iter__(self) -> EUI:
+        """An iterator providing access to all `EUI` objects within range represented by this ranged
+        EUI object.
+
+        Yields:
+            Iterator[EUI]: The iterator function that yields EUIs.
+        """
+        start_eui = EUI(self.first, version=self._module.version)
+        end_eui = EUI(self.last, version=self._module.version)
+        return iter_EUIRange(start_eui, end_eui)
+
+    def __getstate__(self) -> Tuple[int, int, int]:
+        """The pickleable tuple representation of `EUIRange` object.
+
+        Returns:
+            Tuple[int, int, int]: The pickled state as a tuple of integers.
+        """
+        return self._start.value, self._end.value, self._module.version
+
+    def __setstate__(self, state: Tuple[int, int, int]):
+        """Unpickles a pickled `EUIRange` object from the tuple representation.
+
+        Args:
+            state (Tuple[int, int, int]): The pickled state as a tuple of integers.
+        """
+        start, end, version = state
+
+        self._start = EUI(start, version=version)
+        self._module = self._start._module
+        self._end = EUI(end, version=version)
+
+    def __contains__(self, other_mac_address: Union[EUI, 'EUIRange', int, str]) -> bool:
+        """Checks whether an EUI exists within the current `EUIRange` object.
+
+        Args:
+            other_mac_address (Union[EUI, Any]): The EUI whose presence within the current range
+            is being checked.
+
+        Returns:
+            bool: A boolean indicating the presence of `other_mac_address` in this EUIRange.
+        """
+        if isinstance(other_mac_address, EUI):
+            # You can't compare EUI-48s with EUI-64s.
+            if self._module.version != other_mac_address._module.version:
+                return False
+            if isinstance(other_mac_address, EUI):
+                return (self._start._value <= other_mac_address._value # type: ignore
+                        and self._end._value >= other_mac_address._value)
+        elif isinstance(other_mac_address, EUIRange):
+            return (self._start._value <= other_mac_address._start._value # type: ignore
+                    and self._end._value >= other_mac_address._end._value)
+        # Whatever it is, try to coalesce it to an EUI.
+        elif isinstance(other_mac_address, (int, str)):
+            return EUI(other_mac_address) in self
+
+        return False
+
+    def __len__(self) -> int:
+        """The number of EUI addresses in this ranged EUI object.
+
+        Returns:
+            int: The number of EUI addresses in this ranged EUI object.
+        """
+        return self.size
+    
+    @overload
+    def __getitem__(self, index: int) -> EUI: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Iterator[EUI]: ...
+
+    def __getitem__(self, index: Union[int,
+                                       slice]) -> Union[EUI, Iterator[EUI]]:
+        """The MAC address(es) in this `EUIRange` object referenced by an index or slice.
+
+        Args:
+            index (Union[int, slice]): The index or slice over the `EUIRange`.
+
+        Raises:
+            IndexError: Raises index errors if the entered index or slice is beyond the range.
+
+        Returns:
+            Union[EUI, Iterator[EUI]]: The MAC address(es) in this `EUIRange` object referenced by
+            index or slice. As slicing can produce large sequences of objects an iterator is
+            returned instead of the more usual `list`.
+        """
+        item = None
+
+        if isinstance(index, slice):
+            (start, stop, step) = index.indices(self.size)
+            if (start + step < 0) or (step > stop):
+                #   step value exceeds start and stop boundaries.
+                item = iter([EUI(self.first, self._module.version)])
+            else:
+                start_eui = EUI(self.first + start,
+                                version=self._module.version)
+                end_eui = EUI(self.first + stop - step,
+                              version=self._module.version)
+                item = iter_EUIRange(start_eui, end_eui, step)
+        else:
+            if (-self.size) <= index < 0:
+                #   negative index.
+                item = EUI(self.last + index + 1,
+                            version=self._module.version)
+            elif 0 <= index <= (self.size - 1):
+                #   Positive index or zero index.
+                item = EUI(self.first + index,
+                            version=self._module.version)
+            else:
+                raise IndexError('Index out range for address range size!')
+
+        return item
+
+    def __hash__(self) -> int:
+        """A hash value uniquely indentifying this `EUIRange` object.
+
+        Returns:
+            int: The hash value.
+        """
+        return hash(self.key())
+
+    def __eq__(self, other: object) -> bool:
+        """Equality magic method for comparing `EUIRange` objects.
+
+        Args:
+            other (EUIRange): An `EUIRange` object.
+
+        Returns:
+            bool: `True` if this `EUIRange` object is equivalent to `other`, `False` otherwise.
+        """
+        if not isinstance(other, EUIRange):
+            return NotImplemented
+        return self.key() == other.key()
+
+    def __ne__(self, other: object) -> bool:
+        """Non-equality magic method for comparing `EUIRange` objects.
+
+        Args:
+            other (EUIRange): An `EUIRange` object.
+
+        Returns:
+            bool: `True` if this `EUIRange` object is not equivalent to `other`, `False` otherwise.
+        """
+        if not isinstance(other, EUIRange):
+            return NotImplemented
+        return self.key() != other.key()
+
+    def __lt__(self, other: 'EUIRange') -> bool:
+        """Less-than magic method for comparing `EUIRange` objects.
+
+        Args:
+            other (EUIRange): An `EUIRange` object.
+
+        Returns:
+            bool: `True` if this `EUIRange` object is less than `other`, `False` otherwise.
+        """
+        if not isinstance(other, EUIRange):
+            return NotImplemented
+        return self.sort_key() < other.sort_key()
+
+    def __le__(self, other: 'EUIRange') -> bool:
+        """Less-than or equal-to magic method for comparing `EUIRange` objects.
+
+        Args:
+            other (EUIRange): An `EUIRange` object.
+
+        Returns:
+            bool: `True` if this `EUIRange` object is less than or equal to `other`, `False`
+            otherwise.
+        """
+        if not isinstance(other, EUIRange):
+            return NotImplemented
+        return self.sort_key() <= other.sort_key()
+
+
+    def __gt__(self, other: 'EUIRange') -> bool:
+        """Greater-than magic method for comparing `EUIRange` objects.
+
+        Args:
+            other (EUIRange): An `EUIRange` object.
+
+        Returns:
+            bool: `True` if this `EUIRange` object is greater than `other`, `False` otherwise.
+        """
+        if not isinstance(other, EUIRange):
+            return NotImplemented
+        return self.sort_key() > other.sort_key()
+
+    def __ge__(self, other: 'EUIRange') -> bool:
+        """Greater-than or equal-to magic method for comparing `EUIRange` objects.
+
+        Args:
+            other (EUIRange): An `EUIRange` object.
+
+        Returns:
+            bool: `True` if this `EUIRange` object is greater than or equal to `other`, `False`
+            otherwise.
+        """
+        if not isinstance(other, EUIRange):
+            return NotImplemented
+        return self.sort_key() >= other.sort_key()
+
+    @property
+    def size(self) -> int:
+        """The total number of EUI addresses within this ranged EUI object.
+
+        Returns:
+            int: Integer for the size of the `EUIRange` object.
+        """
+        return int(self.last - self.first + 1)
+
+    @property
+    def first(self) -> int:
+        """The integer value of first EUI address in this `EUIRange` object.
+
+        Returns:
+            int: Integer for the first `EUI` object in this range.
+        """
+        return int(self._start)
+
+    @property
+    def last(self) -> int:
+        """The integer value of last EUI address in this `EUIRange` object.
+
+        Returns:
+            int: Integer for the last `EUI` object in this range.
+        """
+        return int(self._end)
+
+    def key(self) -> Tuple[int, EUI, EUI]:
+        """A method that returns a key tuple used to uniquely identify this `EUIRange`.
+
+        Returns:
+            Tuple[int, EUI, EUI]: The key tuple used to uniquely identify this `EUIRange`.
+        """
+        return self._module.version, self.first, self.last
+
+    def sort_key(self) -> Tuple[int, int, int]:
+        """A method that returns a key tuple used to compare and sort this `EUIRange`.
+
+        Returns:
+            Tuple[int, EUI, EUI]: The key tuple used to compare and sort identify this `EUIRange`.
+        """
+        skey = self._module.width - self.size.bit_length()
+        return self._module.version, self._start._value, skey
+
+    def __str__(self) -> str:
+        """A string magic method to return a string representation of the current `EUIRange`.
+
+        Returns:
+            str: The formatted range string.
+        """
+        return f"{self._start}<->{self._end}"
+
+    def __repr__(self) -> str:
+        """The object representation magic method to return a detailed string rebresentation of
+        the current `EUIRange` object.
+
+        Returns:
+            str: Python statement to create an equivalent object.
+        """
+        return self.__class__.__name__
+
 
